@@ -1,33 +1,45 @@
 """
-Coinbase REST MVP bot (dedup‑safe)
----------------------------------
-• Pulls 15‑minute BTC/USDC candles from Coinbase Advanced REST
-• Inserts **unique** rows using SQLite constraints (`INSERT OR IGNORE`)
-• Drops a dummy limit order then cancels it, recording fills with `INSERT OR REPLACE`
-• Safe to stop/start without duplicating data
+Coinbase REST MVP bot v0.4 BUY-LOGIC
+--------------------------------------
+Simple 20/50-EMA crossover long strategy on 15-minute BTC/USDC.
+• Dedup-safe SQLite storage (candles, orders)
+• Restart-safe candle fetch (no future `since`)
+• Position sizing = 1 % of account equity
+• Entry: bullish crossover just closed (EMA20 now > EMA50 and previously ≤)
+• Exit logic not yet implemented (next milestone)
+
+USAGE
+-----
+$ python coinbase_rest_mvp.py --live     # real trade
+$ python coinbase_rest_mvp.py --paper    # log only
+
+ENV
+---
+COINBASE_API_KEY, COINBASE_API_SECRET, COINBASE_API_PASSPHRASE
 """
 
 import os
 import time
 import datetime as dt
+import argparse
+import math
 import sqlite3
-from typing import Optional
+from typing import Tuple
 
+import pandas as pd
 import ccxt
 from dotenv import load_dotenv
 
-
-PAIR: str = "BTC/USD"
-TIMEFRAME: str = "15m"
-DB_FILE: str = "bot_log.db"
-ORDER_QTY: float = 0.0001  # ~ $6 @ $60k BTC – adjust to your test size
-PRICE_OFFSET_PCT: float = -0.01  # 1 % below last price (buy‑side)
-SLEEP_SEC: int = 30  # loop pause between pulls
-
 load_dotenv()
+
 API_KEY = os.getenv("COINBASE_API_KEY")
 API_SECRET = os.getenv("COINBASE_API_SECRET")
 API_PASSPHRASE = ""  # No passphrase available for Coinbase Pro API
+PAIR: str = "BTC/USD"
+TIMEFRAME: str = "15m"
+DB_FILE: str = "bot_log.db"
+RISK_PCT = 0.01  # 1 % per position
+MIN_QTY = 0.0001  # Coinbase min size for BTC
 
 exchange = ccxt.coinbase({
     "apiKey": API_KEY,
@@ -39,124 +51,124 @@ exchange = ccxt.coinbase({
 TIMEFRAME_MS = exchange.parse_timeframe(TIMEFRAME) * 1000  # 15m → 900 000 ms
 
 
-def init_db(path: str) -> sqlite3.Connection:
-    conn = sqlite3.connect(path)
-    cur = conn.cursor()
+def init_db(db_file: str) -> Tuple[sqlite3.Connection, sqlite3.Cursor]:
+    """Create/connect to SQLite DB and ensure schema exists."""
+    con = sqlite3.connect(db_file)
+    cur = con.cursor()
+    cur.execute("""CREATE TABLE IF NOT EXISTS candles (
+        ts INTEGER,
+        pair TEXT,
+        timeframe TEXT,
+        open REAL, high REAL, low REAL, close REAL, volume REAL,
+        UNIQUE (ts, pair, timeframe))""")
+    cur.execute("""CREATE TABLE IF NOT EXISTS orders (
+        id TEXT PRIMARY KEY,
+        ts INTEGER,
+        side TEXT,
+        price REAL,
+        amount REAL,
+        status TEXT)""")
+    con.commit()
+    return con, cur
+
+
+# Initialize DB
+con, cur = init_db(DB_FILE)
+
+# Candle Fetching
+
+
+def fetch_and_store_new_candles():
+    # find last stored ts
     cur.execute(
-        """CREATE TABLE IF NOT EXISTS candles (
-                ts       INTEGER NOT NULL,
-                pair     TEXT    NOT NULL,
-                timeframe TEXT   NOT NULL,
-                open     REAL,
-                high     REAL,
-                low      REAL,
-                close    REAL,
-                volume   REAL,
-                UNIQUE (ts, pair, timeframe)
-            );"""
-    )
-    cur.execute(
-        """CREATE TABLE IF NOT EXISTS orders (
-                id       TEXT PRIMARY KEY,
-                ts       INTEGER,
-                pair     TEXT,
-                side     TEXT,
-                price    REAL,
-                qty      REAL,
-                status   TEXT
-            );"""
-    )
-    conn.commit()
-    return conn
-
-
-def last_candle_ts(conn: sqlite3.Connection) -> Optional[int]:
-    cur = conn.cursor()
-    cur.execute(
-        "SELECT MAX(ts) FROM candles WHERE pair = ? AND timeframe = ?;",
-        (PAIR, TIMEFRAME),
-    )
-    res = cur.fetchone()
-    return res[0] if res and res[0] else None
-
-
-def upsert_candles(conn: sqlite3.Connection):
-    since_ts = last_candle_ts(conn)
-
-    # Advance one full bar so we don't re‑request the last candle
-    if since_ts is not None:
-        next_since = since_ts + TIMEFRAME_MS
-        now_ms = int(time.time() * 1000)
-        # Coinbase rejects future "start"; reset if next_since ≥ now
-        since_ts = next_since if next_since < now_ms else None
-
+        "SELECT COALESCE(MAX(ts), 0) FROM candles WHERE pair=? AND timeframe=?", (PAIR, TIMEFRAME))
+    last_ts = cur.fetchone()[0]
+    # ccxt wants ms
+    if last_ts == 0:
+        since = None
+    else:
+        since = last_ts + 60_000  # one minute after last bar’s open
+        # avoid future
+        since = min(since, int(time.time() * 1000) - 60_000)
     candles = exchange.fetch_ohlcv(
-        PAIR,
-        timeframe=TIMEFRAME,
-        since=since_ts,
-        limit=500,
-    )
+        PAIR, timeframe=TIMEFRAME, since=since, limit=200)
+    rows = [(ts, PAIR, TIMEFRAME, o, h, l, c, v)
+            for ts, o, h, l, c, v in candles]
+    cur.executemany(
+        "INSERT OR IGNORE INTO candles VALUES (?,?,?,?,?,?,?,?)", rows)
+    con.commit()
+    return len(rows)
 
-    if not candles:
-        print("[i] No new candles available yet")
-        return
-
-    cur = conn.cursor()
-    for ts, o, h, l, c, v in candles:
-        cur.execute(
-            """INSERT OR IGNORE INTO candles
-                   (ts, pair, timeframe, open, high, low, close, volume)
-                   VALUES (?,?,?,?,?,?,?,?);""",
-            (ts, PAIR, TIMEFRAME, o, h, l, c, v),
-        )
-    conn.commit()
-    last_bar_time = dt.datetime.utcfromtimestamp(candles[-1][0] / 1000)
-    print(f"[+] Stored {len(candles)} candles up to {last_bar_time}")
+# The strategy logic
 
 
-def demo_order(conn: sqlite3.Connection):
-    ticker = exchange.fetch_ticker(PAIR)
-    mark_price = ticker["last"]
-    buy_price = round(mark_price * (1 + PRICE_OFFSET_PCT), 2)
-    print(f"[i] Placing limit‑buy {ORDER_QTY} {PAIR} at {buy_price}")
-    order = exchange.create_limit_buy_order(PAIR, ORDER_QTY, buy_price)
-    record_order(conn, order)
-    time.sleep(2)  # give the exchange a breath
-    exchange.cancel_order(order["id"], PAIR)
-    canceled = exchange.fetch_order(order["id"], PAIR)
-    record_order(conn, canceled)
-    print("[+] Dummy order placed & canceled")
+def calc_emas(df: pd.DataFrame):
+    df["ema20"] = df["close"].ewm(span=20, adjust=False).mean()
+    df["ema50"] = df["close"].ewm(span=50, adjust=False).mean()
+    return df
 
 
-def record_order(conn: sqlite3.Connection, o: dict):
-    cur = conn.cursor()
-    cur.execute(
-        """INSERT OR REPLACE INTO orders
-               (id, ts, pair, side, price, qty, status)
-               VALUES (?,?,?,?,?,?,?);""",
-        (
-            o["id"],
-            int(time.time() * 1000),
-            PAIR,
-            o["side"],
-            o.get("price") or o.get("price_average"),
-            o["filled"],
-            o["status"],
-        ),
-    )
-    conn.commit()
+def bullish_crossover(df: pd.DataFrame) -> bool:
+    if len(df) < 51:
+        return False
+    # last two closes
+    last = df.iloc[-1]
+    prev = df.iloc[-2]
+    return prev["ema20"] <= prev["ema50"] and last["ema20"] > last["ema50"]
 
 
-def main():
-    conn = init_db(DB_FILE)
+def in_open_position() -> bool:
+    # check outstanding orders or manual flag; for v0.4 assume flat (no exits yet)
+    open_orders = exchange.fetch_open_orders(symbol=PAIR)
+    return len(open_orders) > 0
+
+
+def position_size(price: float) -> float:
+    bal = exchange.fetch_balance()["total"].get("USDC", 0)
+    stake = bal * RISK_PCT
+    qty = stake / price
+    return max(round(qty, 6), MIN_QTY)
+
+
+def place_market_buy(qty: float):
+    order = exchange.create_market_buy_order(PAIR, qty)
+    cur.execute("INSERT OR REPLACE INTO orders VALUES (?,?,?,?,?,?)", (
+        order["id"], int(time.time()*1000), "buy", order["average"], order["filled"], order["status"]))
+    con.commit()
+    print("[+] Placed market buy", order["id"], "qty", qty)
+
+
+def loop(is_live: bool = True):
+    """Main bot loop. Set `is_live=False` to paper‑trade."""
     while True:
         try:
-            upsert_candles(conn)
-            # demo_order(conn)
+            print("[*] Fetching new candles...")
+            inserted = fetch_and_store_new_candles()
+            if inserted:
+                print("[+] Inserted", inserted, "new candles")
+                df = pd.read_sql_query("SELECT * FROM candles WHERE pair=? AND timeframe=? ORDER BY ts", con,
+                                       params=(PAIR, TIMEFRAME))
+                df = calc_emas(df)
+                if not in_open_position() and bullish_crossover(df):
+                    print("[+] Bullish crossover detected!")
+                    price = df.iloc[-1]["close"]
+                    qty = position_size(price)
+                    if is_live:
+                        print("[*] Placing real market buy order for",
+                              qty, "BTC at", price)
+                        place_market_buy(qty)
+                    else:
+                        print("[PAPER] Would buy", qty, "BTC at", price)
+            time.sleep(10)  # stay under rate limits
         except Exception as e:
             print("[!] Error:", e)
-        time.sleep(SLEEP_SEC)
+            time.sleep(30)
 
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--paper", action="store_true",
+                        help="Run in paper-trade mode (no real orders)")
+    args = parser.parse_args()
+    is_live = not args.paper
+    loop(is_live=is_live)
