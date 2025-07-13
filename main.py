@@ -12,8 +12,8 @@ CoinBase Crypto bot v0.2 - FULL TRADE CYCLE
 
 USAGE
 -----
-$ python main.py --live        # real trade
-$ python main.py --paper       # log only, no real orders (default)
+$ python main.py --live        # real trade (default)
+$ python main.py --paper       # log only, no real orders
 $ python main.py --risk 0.005  # use 0.5 % risk per position
 
 ENV
@@ -157,6 +157,6 @@ if __name__ == "__main__":
 
     is_live = args.live
     if args.paper:
-        is_live = False  # Paper trading overrides live mode
+        is_live = False  # Override live mode if paper trading is selected
     risk_per_trade = args.risk
     main(is_live=is_live, risk_pct=risk_per_trade)
