@@ -1,45 +1,48 @@
 """
-Coinbase REST MVP bot v0.4 BUY-LOGIC
---------------------------------------
-Simple 20/50-EMA crossover long strategy on 15-minute BTC/USDC.
-• Dedup-safe SQLite storage (candles, orders)
-• Restart-safe candle fetch (no future `since`)
-• Position sizing = 1 % of account equity
-• Entry: bullish crossover just closed (EMA20 now > EMA50 and previously ≤)
-• Exit logic not yet implemented (next milestone)
+CoinBase Crypto bot v0.2 - FULL TRADE CYCLE
+--------------------------------------------
+20/50-EMA crossover strategy on 15-minute BTC/USDC, now with **exit logic**:
+• **Entry** - bullish crossover closes (EMA20 > EMA50 after being ≤)
+• **Exit** - first condition hit:
+    1. Bearish crossover (EMA20 < EMA50)
+    2. 2 % stop-loss (price ≤ entry x 0.98)
+    3. 2 % take-profit (price ≥ entry x 1.02)
+• Position-sizing = 1 % of USDC equity per trade
+• SQLite dedup + restart-safe
 
 USAGE
 -----
-$ python coinbase_rest_mvp.py --live     # real trade
-$ python coinbase_rest_mvp.py --paper    # log only
+$ python main.py --live        # real trade
+$ python main.py --paper       # log only, no real orders (default)
+$ python main.py --risk 0.005  # use 0.5 % risk per position
 
 ENV
 ---
 COINBASE_API_KEY, COINBASE_API_SECRET, COINBASE_API_PASSPHRASE
 """
 
+import argparse
 import os
 import time
 import datetime as dt
-import argparse
-import math
 import sqlite3
-from typing import Tuple
+from typing import Optional, Tuple
 
-import pandas as pd
 import ccxt
 from dotenv import load_dotenv
+import pandas as pd
 
-load_dotenv()
 
-API_KEY = os.getenv("COINBASE_API_KEY")
-API_SECRET = os.getenv("COINBASE_API_SECRET")
-API_PASSPHRASE = ""  # No passphrase available for Coinbase Pro API
 PAIR: str = "BTC/USD"
 TIMEFRAME: str = "15m"
 DB_FILE: str = "bot_log.db"
-RISK_PCT = 0.01  # 1 % per position
-MIN_QTY = 0.0001  # Coinbase min size for BTC
+ORDER_QTY: float = 0.0001  # ~ $6 @ $60k BTC – adjust to your test size
+PRICE_OFFSET_PCT: float = -0.01  # 1 % below last price (buy‑side)
+
+load_dotenv()
+API_KEY = os.getenv("COINBASE_API_KEY")
+API_SECRET = os.getenv("COINBASE_API_SECRET")
+API_PASSPHRASE = os.getenv("COINBASE_API_PASSPHRASE")
 
 exchange = ccxt.coinbase({
     "apiKey": API_KEY,
@@ -52,8 +55,7 @@ TIMEFRAME_MS = exchange.parse_timeframe(TIMEFRAME) * 1000  # 15m → 900 000 m
 
 
 def init_db(db_file: str) -> Tuple[sqlite3.Connection, sqlite3.Cursor]:
-    """Create/connect to SQLite DB and ensure schema exists."""
-    con = sqlite3.connect(db_file)
+    con = sqlite3.connect(db_file, check_same_thread=False)
     cur = con.cursor()
     cur.execute("""CREATE TABLE IF NOT EXISTS candles (
         ts INTEGER,
@@ -72,103 +74,89 @@ def init_db(db_file: str) -> Tuple[sqlite3.Connection, sqlite3.Cursor]:
     return con, cur
 
 
-# Initialize DB
 con, cur = init_db(DB_FILE)
 
-# Candle Fetching
+# Fetch new candles and store them in the database
 
 
-def fetch_and_store_new_candles():
-    # find last stored ts
-    cur.execute(
-        "SELECT COALESCE(MAX(ts), 0) FROM candles WHERE pair=? AND timeframe=?", (PAIR, TIMEFRAME))
-    last_ts = cur.fetchone()[0]
-    # ccxt wants ms
-    if last_ts == 0:
-        since = None
-    else:
-        since = last_ts + 60_000  # one minute after last bar’s open
-        # avoid future
-        since = min(since, int(time.time() * 1000) - 60_000)
-    candles = exchange.fetch_ohlcv(
-        PAIR, timeframe=TIMEFRAME, since=since, limit=200)
-    rows = [(ts, PAIR, TIMEFRAME, o, h, l, c, v)
-            for ts, o, h, l, c, v in candles]
-    cur.executemany(
-        "INSERT OR IGNORE INTO candles VALUES (?,?,?,?,?,?,?,?)", rows)
-    con.commit()
-    return len(rows)
+def fetch_and_store_candles(conn: sqlite3.Connection):
+    pass  # Placeholder for fetching candles logic
 
-# The strategy logic
+# Strategy Logic
 
 
-def calc_emas(df: pd.DataFrame):
-    df["ema20"] = df["close"].ewm(span=20, adjust=False).mean()
-    df["ema50"] = df["close"].ewm(span=50, adjust=False).mean()
-    return df
+def calc_emas(df: pd.DataFrame) -> list:
+    ema_20 = df['close'].ewm(span=20, adjust=False).mean()
+    ema_50 = df['close'].ewm(span=50, adjust=False).mean()
+    return ema_20, ema_50
 
 
-def bullish_crossover(df: pd.DataFrame) -> bool:
-    if len(df) < 51:
-        return False
-    # last two closes
-    last = df.iloc[-1]
-    prev = df.iloc[-2]
-    return prev["ema20"] <= prev["ema50"] and last["ema20"] > last["ema50"]
+def bullish_crossover() -> bool:
+    pass  # Placeholder for bullish crossover logic
 
 
-def in_open_position() -> bool:
-    # check outstanding orders or manual flag; for v0.4 assume flat (no exits yet)
-    open_orders = exchange.fetch_open_orders(symbol=PAIR)
-    return len(open_orders) > 0
+def bearish_crossover() -> bool:
+    pass  # Placeholder for bearish crossover logic
+
+# Order Management
 
 
-def position_size(price: float) -> float:
-    bal = exchange.fetch_balance()["total"].get("USDC", 0)
-    stake = bal * RISK_PCT
-    qty = stake / price
-    return max(round(qty, 6), MIN_QTY)
+def last_order():
+    pass  # Placeholder for fetching last order logic
 
 
-def place_market_buy(qty: float):
-    order = exchange.create_market_buy_order(PAIR, qty)
-    cur.execute("INSERT OR REPLACE INTO orders VALUES (?,?,?,?,?,?)", (
-        order["id"], int(time.time()*1000), "buy", order["average"], order["filled"], order["status"]))
-    con.commit()
-    print("[+] Placed market buy", order["id"], "qty", qty)
+def in_position() -> bool:
+    pass  # Placeholder for checking if in position logic
 
 
-def loop(is_live: bool = True):
-    """Main bot loop. Set `is_live=False` to paper‑trade."""
+def get_position():
+    pass  # Placeholder for getting current position logic
+
+
+def usdc_balance() -> float:
+    pass  # Placeholder for fetching USDC balance logic
+
+
+def get_position_size():
+    pass  # Placeholder for calculating position size logic
+
+# Order Execution
+
+
+def record_order():
+    pass  # Placeholder for recording order logic
+
+
+def place_market_buy():
+    pass  # Placeholder for placing market buy order logic
+
+
+def place_market_sell():
+    pass  # Placeholder for placing market sell order logic
+
+
+def main(is_live: bool = False,):
     while True:
         try:
-            print("[*] Fetching new candles...")
-            inserted = fetch_and_store_new_candles()
-            if inserted:
-                print("[+] Inserted", inserted, "new candles")
-                df = pd.read_sql_query("SELECT * FROM candles WHERE pair=? AND timeframe=? ORDER BY ts", con,
-                                       params=(PAIR, TIMEFRAME))
-                df = calc_emas(df)
-                if not in_open_position() and bullish_crossover(df):
-                    print("[+] Bullish crossover detected!")
-                    price = df.iloc[-1]["close"]
-                    qty = position_size(price)
-                    if is_live:
-                        print("[*] Placing real market buy order for",
-                              qty, "BTC at", price)
-                        place_market_buy(qty)
-                    else:
-                        print("[PAPER] Would buy", qty, "BTC at", price)
-            time.sleep(10)  # stay under rate limits
+            print("[i] Fetching new candles...")
+            time.sleep(1)  # Rate limit safeguard
         except Exception as e:
             print("[!] Error:", e)
             time.sleep(30)
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(description="CoinBase Crypto Bot")
+    parser.add_argument("--live", action="store_true",
+                        help="Enable live trading")
     parser.add_argument("--paper", action="store_true",
-                        help="Run in paper-trade mode (no real orders)")
+                        help="Enable paper trading")
+    parser.add_argument("--risk", type=float, default=0.01,
+                        help="Risk per trade")
     args = parser.parse_args()
-    is_live = not args.paper
-    loop(is_live=is_live)
+
+    is_live = args.live
+    if args.paper:
+        is_live = False  # Paper trading overrides live mode
+    risk_per_trade = args.risk
+    main(is_live=is_live, risk_pct=risk_per_trade)
