@@ -180,12 +180,41 @@ def position_size(usdc_balance: float, price: float, risk_pct: float) -> float:
     return round(usd_risk / price, 8)
 
 
+def compute_atr(df: pd.DataFrame, period: int = 20) -> float:
+    """Return the Average True Range over the last ``period`` bars."""
+    high = df["high"]
+    low = df["low"]
+    close = df["close"].shift()
+    tr = pd.concat([
+        high - low,
+        (high - close).abs(),
+        (low - close).abs(),
+    ], axis=1).max(axis=1)
+    return tr.tail(period).mean()
+
+
 def trade_logic(db: Database, df: pd.DataFrame, state: str, is_live: bool, risk_pct: float) -> None:
     last_close = df["close"].iloc[-1]
     order = db.last_open_order()
+    atr = compute_atr(df)
+    high20 = df["high"].iloc[-21:-1].max()
+    low20 = df["low"].iloc[-21:-1].min()
+    range_mid = (high20 + low20) / 2
+    range_size = high20 - low20
 
-    # exit logic
+    # exit logic and trailing
     if order:
+        if state in ("up", "down"):
+            if order.side == "buy":
+                new_stop = max(order.stop, last_close - atr)
+                new_target = last_close + atr
+            else:
+                new_stop = min(order.stop, last_close + atr)
+                new_target = last_close - atr
+            if new_stop != order.stop or new_target != order.target:
+                order = Order(order.id, order.ts, order.side, order.price, order.amount, new_stop, new_target, order.status)
+                db.record_order(order)
+
         hit_stop = df["low"].iloc[-1] <= order.stop if order.side == "buy" else df["high"].iloc[-1] >= order.stop
         hit_target = df["high"].iloc[-1] >= order.target if order.side == "buy" else df["low"].iloc[-1] <= order.target
         state_flip = (state == "up" and order.side == "sell") or (state == "down" and order.side == "buy") or state == "chaos"
@@ -203,25 +232,35 @@ def trade_logic(db: Database, df: pd.DataFrame, state: str, is_live: bool, risk_
     # entry logic
     usdc = float(exchange.fetch_balance()["total"].get("USDC", 0)) if is_live else 1000.0
     amount = position_size(usdc, last_close, risk_pct)
-    candle_size = abs(df["close"].iloc[-1] - df["open"].iloc[-1]) / 2
     if state == "consolidation":
-        high = df["high"].tail(20).max()
-        low = df["low"].tail(20).min()
-        if last_close <= low * 1.001:
+        bottom_entry = low20 + 0.1 * range_size
+        top_entry = high20 - 0.1 * range_size
+        if last_close <= bottom_entry:
             side = "buy"
-        elif last_close >= high * 0.999:
+            stop = low20 - atr
+            target = range_mid
+        elif last_close >= top_entry:
             side = "sell"
+            stop = high20 + atr
+            target = range_mid
         else:
             return
     elif state == "up":
-        side = "buy"
+        if last_close > high20:
+            side = "buy"
+            stop = high20 - atr
+            target = last_close + atr
+        else:
+            return
     elif state == "down":
-        side = "sell"
+        if last_close < low20:
+            side = "sell"
+            stop = low20 + atr
+            target = last_close - atr
+        else:
+            return
     else:
         return
-
-    stop = last_close - candle_size if side == "buy" else last_close + candle_size
-    target = last_close + candle_size if side == "buy" else last_close - candle_size
     logging.info("Placing %s for %.6f BTC @ %.2f", side, amount, last_close)
     if is_live:
         # real market order would go here

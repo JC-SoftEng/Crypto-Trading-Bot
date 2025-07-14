@@ -2,7 +2,7 @@ import sys, pathlib
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 import os
 import pandas as pd
-from bot import label_state, trade_logic, Database
+from bot import label_state, trade_logic, Database, compute_atr
 
 
 def make_df(prices):
@@ -42,9 +42,12 @@ def test_trade_open_and_close(tmp_path):
     trade_logic(db, df, state, is_live=False, risk_pct=0.01)
     order = db.last_open_order()
     assert order is not None and order.side == "buy"
+    expected_stop = df["high"].iloc[-21:-1].max() - compute_atr(df)
+    assert abs(order.stop - expected_stop) < 1e-6
 
     # next bar triggers exit at stop
-    stop_bar = make_df([(99, 101, 80, 81)])
+    stop_level = order.stop
+    stop_bar = make_df([(99, 101, stop_level - 1, stop_level - 1)])
     df = pd.concat([df, stop_bar])
     state = "chaos"
     trade_logic(db, df, state, is_live=False, risk_pct=0.01)
