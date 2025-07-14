@@ -1,24 +1,31 @@
-"""Trading bot implementing the Iman-style Categorize -> Adapt -> Trade system.
+"""Simple Coinbase trading bot.
 
-The bot trades BTC/USDC on Coinbase Advanced using 15 minute candles. It
-stores candles and orders in SQLite so that restarts are safe. Market state
-(consolidation, up-trend, down-trend or chaos) is detected each new candle
-using simple rules based on ATR and twenty bar highs/lows. Orders are sized at
-``risk_pct`` of USDC equity and are executed at the close of the signal bar.
+The bot trades BTC/USDC on Coinbase Advanced using 15 minute candles. Candles
+and orders are persisted to SQLite so that restarts are safe. Market state
+(consolidation, up-trend, down-trend or chaos) is detected each candle using
+rules based on ATR and twenty bar highs/lows. Orders are sized at ``risk_pct``
+of USDC equity and executed at the close of the signal bar.
 
-Usage:
+Usage::
+
     $ python bot.py --live          # place real orders (default)
     $ python bot.py --paper         # run in paper trading mode
     $ python bot.py --risk 0.005    # risk 0.5 % per trade
     $ python bot.py --loglevel INFO # adjust logging level
 
-Environment variables:
-    COINBASE_API_KEY, COINBASE_API_SECRET, COINBASE_API_PASSPHRASE
+Environment variables expected in ``.env``:
+    ``COINBASE_API_KEY``
+    ``COINBASE_API_SECRET``
+    ``COINBASE_API_PASSPHRASE``
+
+API keys should be created with **read** and **trade** permissions only – no
+withdrawal scope.
 """
 
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import os
 import sqlite3
@@ -89,6 +96,15 @@ class Database:
                 status TEXT
             )"""
         )
+        self.cur.execute(
+            """CREATE TABLE IF NOT EXISTS logs (
+                ts INTEGER,
+                state TEXT,
+                decision TEXT,
+                pnl REAL,
+                equity REAL
+            )"""
+        )
         self.con.commit()
 
     def max_ts(self) -> int:
@@ -118,12 +134,12 @@ class Database:
             "INSERT OR REPLACE INTO orders VALUES (?,?,?,?,?,?,?,?)",
             (
                 order.id,
-                order.ts,
+                int(order.ts),
                 order.side,
-                order.price,
-                order.amount,
-                order.stop,
-                order.target,
+                float(order.price),
+                float(order.amount),
+                float(order.stop),
+                float(order.target),
                 order.status,
             ),
         )
@@ -133,6 +149,14 @@ class Database:
         self.cur.execute(
             "UPDATE orders SET status='closed', ts=? WHERE id=?",
             (ts, order_id),
+        )
+        self.con.commit()
+
+    def log_tick(self, ts: int, state: str, decision: str, pnl: float, equity: float) -> None:
+        """Store a log entry for a completed tick."""
+        self.cur.execute(
+            "INSERT INTO logs VALUES (?,?,?,?,?)",
+            (ts, state, decision, pnl, equity),
         )
         self.con.commit()
 
@@ -146,6 +170,7 @@ class Database:
 
 
 def fetch_new_candles(db: Database) -> pd.DataFrame:
+    """Fetch new candles and enforce data integrity."""
     last_ts = db.max_ts()
     since = last_ts + TIMEFRAME_MS if last_ts else None
     try:
@@ -153,6 +178,23 @@ def fetch_new_candles(db: Database) -> pd.DataFrame:
     except Exception as exc:
         logging.error("error fetching candles via REST: %s", exc)
         raise
+    if not bars:
+        raise ValueError("no candles returned")
+
+    # data integrity: nulls, duplicates and gaps
+    timestamps = []
+    for bar in bars:
+        if None in bar[:6]:
+            raise ValueError("NULL value in candle data")
+        ts = bar[0]
+        if timestamps and ts - timestamps[-1] > TIMEFRAME_MS * 4:
+            raise ValueError("data gap greater than 3 bars")
+        timestamps.append(ts)
+    if len(timestamps) != len(set(timestamps)):
+        raise ValueError("duplicate candle timestamps")
+    if last_ts and timestamps[0] - last_ts > TIMEFRAME_MS * 4:
+        raise ValueError("data gap greater than 3 bars")
+
     db.store_candles(bars)
     return db.candles_dataframe()
 
@@ -193,7 +235,19 @@ def compute_atr(df: pd.DataFrame, period: int = 20) -> float:
     return tr.tail(period).mean()
 
 
-def trade_logic(db: Database, df: pd.DataFrame, state: str, is_live: bool, risk_pct: float) -> None:
+def get_equity(is_live: bool, last_price: float) -> float:
+    """Return total equity in USDC."""
+    if is_live:
+        bal = exchange.fetch_balance()
+        usdc = float(bal["total"].get("USDC", 0))
+        btc = float(bal["total"].get("BTC", 0))
+    else:
+        usdc = 1000.0
+        btc = 0.0
+    return usdc + btc * last_price
+
+
+def trade_logic(db: Database, df: pd.DataFrame, state: str, is_live: bool, risk_pct: float) -> tuple[str, float]:
     last_close = df["close"].iloc[-1]
     order = db.last_open_order()
     atr = compute_atr(df)
@@ -201,6 +255,9 @@ def trade_logic(db: Database, df: pd.DataFrame, state: str, is_live: bool, risk_
     low20 = df["low"].iloc[-21:-1].min()
     range_mid = (high20 + low20) / 2
     range_size = high20 - low20
+
+    decision = "hold"
+    pnl = 0.0
 
     # exit logic and trailing
     if order:
@@ -223,11 +280,15 @@ def trade_logic(db: Database, df: pd.DataFrame, state: str, is_live: bool, risk_
             if is_live:
                 # real sell/buy to close would go here
                 pass
+            pnl = (last_close - order.price) * order.amount
+            if order.side == "sell":
+                pnl *= -1
             db.close_order(order.id, int(df["ts"].iloc[-1]))
+            decision = "close"
             order = None
 
     if order:
-        return
+        return decision, pnl
 
     # entry logic
     usdc = float(exchange.fetch_balance()["total"].get("USDC", 0)) if is_live else 1000.0
@@ -244,40 +305,51 @@ def trade_logic(db: Database, df: pd.DataFrame, state: str, is_live: bool, risk_
             stop = high20 + atr
             target = range_mid
         else:
-            return
+            return decision, pnl
     elif state == "up":
         if last_close > high20:
             side = "buy"
             stop = high20 - atr
             target = last_close + atr
         else:
-            return
+            return decision, pnl
     elif state == "down":
         if last_close < low20:
             side = "sell"
             stop = low20 + atr
             target = last_close - atr
         else:
-            return
+            return decision, pnl
     else:
-        return
+        return decision, pnl
     logging.info("Placing %s for %.6f BTC @ %.2f", side, amount, last_close)
     if is_live:
         # real market order would go here
         pass
     order = Order(id=None, ts=int(df["ts"].iloc[-1]), side=side, price=last_close, amount=amount, stop=stop, target=target, status="open")
     db.record_order(order)
-
-
+    decision = side
+    return decision, pnl
 def run_bot(is_live: bool = False, risk_pct: float = 0.01) -> None:
     db = Database(DB_FILE)
     logging.info("starting bot: live=%s risk_pct=%s", is_live, risk_pct)
+    equity = get_equity(is_live, 0)
+    peak_equity = equity
     while True:
         try:
             df = fetch_new_candles(db)
             state = label_state(df)
             logging.info("state=%s close=%s", state, df["close"].iloc[-1])
-            trade_logic(db, df, state, is_live, risk_pct)
+            decision, pnl = trade_logic(db, df, state, is_live, risk_pct)
+            last_price = df["close"].iloc[-1]
+            equity = get_equity(is_live, last_price)
+            peak_equity = max(peak_equity, equity)
+            drawdown = (peak_equity - equity) / peak_equity
+            if drawdown >= 0.10 and is_live:
+                logging.warning("drawdown exceeded 10%% - disabling live trading")
+                is_live = False
+            db.log_tick(int(df["ts"].iloc[-1]), state, decision, pnl, equity)
+            print(json.dumps({"ts": int(df["ts"].iloc[-1]), "state": state, "decision": decision, "pnl": pnl, "equity": equity}))
             time.sleep(TIMEFRAME_MS / 1000)
         except Exception as exc:
             logging.error("error in main loop: %s", exc)
