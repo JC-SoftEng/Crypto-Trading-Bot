@@ -92,9 +92,9 @@ def calc_ema(df: pd.DataFrame) -> Tuple[pd.Series, pd.Series]:
     """
     Calculates the 20-period and 50-period EMAs from the 'close' column.
     Args:
-        df (pd.DataFrame): DataFrame containing 'close' prices.
+        pd.DataFrame: DataFrame containing 'close' prices.
     Returns:
-        Tuple[pd.Series, pd.Series]: A tuple containing two Series: (EMA 20, EMA 50) in this order.
+        (Tuple[pd.Series, pd.Series]): A tuple containing two Series: (EMA 20, EMA 50) in this order.
     Raises:
         KeyError: If 'close' column is not present in the DataFrame.
     """
@@ -109,7 +109,7 @@ def bullish_crossover(df: pd.DataFrame) -> bool:
     """
     Checks for a bullish crossover between the 20-period and 50-period EMAs.
     Args:
-        df (pd.DataFrame): DataFrame containing 'close' prices.
+        pd.DataFrame: DataFrame containing 'close' prices.
     Returns:
         bool: True if a bullish crossover occurred, False otherwise.
     """
