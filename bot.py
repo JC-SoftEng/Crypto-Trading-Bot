@@ -29,8 +29,9 @@ import pandas as pd
 PAIR: str = "BTC/USD"
 TIMEFRAME: str = "15m"
 DB_FILE: str = "bot_log.db"
-ORDER_QTY: float = 0.0001  # ~ $6 @ $60k BTC – adjust to your test size
-PRICE_OFFSET_PCT: float = -0.01  # 1 % below last price (buy‑side)
+ORDER_QTY: float = 0.00001  # ~ $0.60 @ $60k BTC – adjust to your test size
+PRICE_OFFSET_PCT: float = -0.01  # 1 % below last price (buy‑side)
+CURRENCY: str = "USDC"
 
 load_dotenv()
 API_KEY = os.getenv("COINBASE_API_KEY")
