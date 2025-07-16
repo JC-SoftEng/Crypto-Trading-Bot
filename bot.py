@@ -247,7 +247,14 @@ def get_equity(is_live: bool, last_price: float) -> float:
     return usdc + btc * last_price
 
 
-def trade_logic(db: Database, df: pd.DataFrame, state: str, is_live: bool, risk_pct: float) -> tuple[str, float]:
+def trade_logic(
+    db: Database,
+    df: pd.DataFrame,
+    state: str,
+    is_live: bool,
+    risk_pct: float,
+    prev_state: Optional[str] = None,
+) -> tuple[str, float]:
     last_close = df["close"].iloc[-1]
     order = db.last_open_order()
     atr = compute_atr(df)
@@ -274,7 +281,12 @@ def trade_logic(db: Database, df: pd.DataFrame, state: str, is_live: bool, risk_
 
         hit_stop = df["low"].iloc[-1] <= order.stop if order.side == "buy" else df["high"].iloc[-1] >= order.stop
         hit_target = df["high"].iloc[-1] >= order.target if order.side == "buy" else df["low"].iloc[-1] <= order.target
-        state_flip = (state == "up" and order.side == "sell") or (state == "down" and order.side == "buy") or state == "chaos"
+        state_flip = (
+            (state == "up" and order.side == "sell")
+            or (state == "down" and order.side == "buy")
+            or state == "chaos"
+            or (prev_state is not None and state != prev_state)
+        )
         if hit_stop or hit_target or state_flip:
             logging.info("Closing order %s", order.id)
             if is_live:
@@ -335,12 +347,14 @@ def run_bot(is_live: bool = False, risk_pct: float = 0.01) -> None:
     logging.info("starting bot: live=%s risk_pct=%s", is_live, risk_pct)
     equity = get_equity(is_live, 0)
     peak_equity = equity
+    prev_state: Optional[str] = None
     while True:
         try:
             df = fetch_new_candles(db)
             state = label_state(df)
             logging.info("state=%s close=%s", state, df["close"].iloc[-1])
-            decision, pnl = trade_logic(db, df, state, is_live, risk_pct)
+            decision, pnl = trade_logic(db, df, state, is_live, risk_pct, prev_state)
+            prev_state = state
             last_price = df["close"].iloc[-1]
             equity = get_equity(is_live, last_price)
             peak_equity = max(peak_equity, equity)

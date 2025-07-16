@@ -52,3 +52,22 @@ def test_trade_open_and_close(tmp_path):
     state = "chaos"
     trade_logic(db, df, state, is_live=False, risk_pct=0.01)
     assert db.last_open_order() is None
+
+
+def test_close_on_state_change(tmp_path):
+    db = Database(str(tmp_path / "state.db"))
+    prices = [(100, 101, 99, 99.5)] * 20
+    prices.append((100, 101, 99, 99.0))  # entry on consolidation break lower
+    df = make_df(prices)
+    state = label_state(df)
+    trade_logic(db, df, state, is_live=False, risk_pct=0.01)
+    first_order = db.last_open_order()
+    assert first_order is not None
+
+    prices.append((100, 103, 99, 102))  # new high triggers up trend
+    df = make_df(prices)
+    state2 = label_state(df)
+    trade_logic(db, df, state2, is_live=False, risk_pct=0.01, prev_state=state)
+    second_order = db.last_open_order()
+    assert second_order is not None
+    assert second_order.id != first_order.id
