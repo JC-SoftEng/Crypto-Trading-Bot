@@ -87,21 +87,61 @@ def fetch_and_store_candles(conn: sqlite3.Connection):
 # Strategy Logic
 
 
-def calc_emas(df: pd.DataFrame) -> list:
+def calc_ema(df: pd.DataFrame) -> Tuple[pd.Series, pd.Series]:
+    """
+    Calculates the 20-period and 50-period EMAs from the 'close' column.
+    Args:
+        df (pd.DataFrame): DataFrame containing 'close' prices.
+    Returns:
+        Tuple[pd.Series, pd.Series]: A tuple containing two Series: (EMA 20, EMA 50) in this order.
+    Raises:
+        KeyError: If 'close' column is not present in the DataFrame.
+    """
+    if 'close' not in df.columns:
+        raise KeyError("DataFrame must contain 'close' column.")
     ema_20 = df['close'].ewm(span=20, adjust=False).mean()
     ema_50 = df['close'].ewm(span=50, adjust=False).mean()
-    return ema_20, ema_50
+    return (ema_20, ema_50)
 
 
 def bullish_crossover(df: pd.DataFrame) -> bool:
-    ema_20, ema_50 = calc_emas(df)
+    """
+    Checks for a bullish crossover between the 20-period and 50-period EMAs.
+    Args:
+        df (pd.DataFrame): DataFrame containing 'close' prices.
+    Returns:
+        bool: True if a bullish crossover occurred, False otherwise.
+    """
+    required_cols = ['close']
+    if len(df) < 2 or not all(col in df.columns for col in required_cols):
+        return False
+    if df['close'].isnull().any():
+        return False
+    ema_20, ema_50 = calc_ema(df)
     if ema_20.empty or ema_50.empty:
         return False
-    return ema_20.iloc[-1] > ema_50.iloc[-1] and ema_20.iloc[-2] <= ema_50.iloc[-2]
+    # Check for NaN values in the last two elements
+    if (
+        pd.isna(ema_20.iloc[-1]) or pd.isna(ema_50.iloc[-1]) or
+        pd.isna(ema_20.iloc[-2]) or pd.isna(ema_50.iloc[-2])
+    ):
+        return False
+    crossed_above = ema_20.iloc[-1] > ema_50.iloc[-1]
+    was_below = ema_20.iloc[-2] <= ema_50.iloc[-2]
+    return crossed_above and was_below
 
 
 def bearish_crossover(df: pd.DataFrame) -> bool:
-    ema_20, ema_50 = calc_emas(df)
+    ema_20, ema_50 = calc_ema(df)
+    if ema_20.empty or ema_50.empty:
+        return False
+    crossed_below = ema_20.iloc[-1] < ema_50.iloc[-1]
+    was_above = ema_20.iloc[-2] >= ema_50.iloc[-2]
+    return crossed_below and was_above
+
+
+def bearish_crossover(df: pd.DataFrame) -> bool:
+    ema_20, ema_50 = calc_ema(df)
     if ema_20.empty or ema_50.empty:
         return False
     return ema_20.iloc[-1] < ema_50.iloc[-1] and ema_20.iloc[-2] >= ema_50.iloc[-2]
