@@ -133,19 +133,30 @@ def bullish_crossover(df: pd.DataFrame) -> bool:
 
 
 def bearish_crossover(df: pd.DataFrame) -> bool:
+    """
+    Checks for a bearish crossover between the 20-period and 50-period EMAs.
+    Args:
+        pd.DataFrame: DataFrame containing 'close' prices.
+    Returns:
+        bool: True if a bearish crossover occurred, False otherwise.
+    """
+    required_cols = ['close']
+    if len(df) < 2 or not all(col in df.columns for col in required_cols):
+        return False
+    if df['close'].isnull().any():
+        return False
     ema_20, ema_50 = calc_ema(df)
     if ema_20.empty or ema_50.empty:
+        return False
+    # Check for NaN values in the last two elements
+    if (
+        pd.isna(ema_20.iloc[-1]) or pd.isna(ema_50.iloc[-1]) or
+        pd.isna(ema_20.iloc[-2]) or pd.isna(ema_50.iloc[-2])
+    ):
         return False
     crossed_below = ema_20.iloc[-1] < ema_50.iloc[-1]
     was_above = ema_20.iloc[-2] >= ema_50.iloc[-2]
     return crossed_below and was_above
-
-
-def bearish_crossover(df: pd.DataFrame) -> bool:
-    ema_20, ema_50 = calc_ema(df)
-    if ema_20.empty or ema_50.empty:
-        return False
-    return ema_20.iloc[-1] < ema_50.iloc[-1] and ema_20.iloc[-2] >= ema_50.iloc[-2]
 
 # Order Management
 
