@@ -19,7 +19,7 @@ import os
 import time
 import datetime as dt
 import sqlite3
-from typing import Optional, Tuple
+from typing import Iterable, Optional, Tuple
 
 import ccxt
 from dotenv import load_dotenv
@@ -32,6 +32,7 @@ DB_FILE: str = "bot_log.db"
 ORDER_QTY: float = 0.00001  # ~ $0.60 @ $60k BTC – adjust to your test size
 PRICE_OFFSET_PCT: float = -0.01  # 1 % below last price (buy‑side)
 CURRENCY: str = "USDC"
+BARS_LOOKBACK: int = 200
 
 load_dotenv()
 API_KEY = os.getenv("COINBASE_API_KEY")
@@ -82,81 +83,60 @@ con, cur = init_db(DB_FILE)
 # Fetch new candles and store them in the database
 
 
-def fetch_and_store_candles(conn: sqlite3.Connection):
+def fetch_candles(conn: sqlite3.Connection):
     pass  # Placeholder for fetching candles logic
+
+
+def store_candles():
+    pass  # Placeholder for storing candles logic
 
 # Strategy Logic
 
 
-def calc_ema(df: pd.DataFrame) -> Tuple[pd.Series, pd.Series]:
-    """
-    Calculates the 20-period and 50-period EMAs from the 'close' column.
+def calc_emas(df: pd.DataFrame, periods: Iterable[int] = (20, 50), price_col: str = 'close', adjust: bool = False) -> pd.DataFrame:
+    """Return a DataFrame of EMAs for each period.
+
     Args:
-        pd.DataFrame: DataFrame containing 'close' prices.
+        df: Price DataFrame containing *price_col*.
+        periods: Iterable of look-back spans (e.g., 20, 50, 200).
+        price_col: Column on which to compute EMAs.
+        adjust: Passed to `pd.Series.ewm`.
+
     Returns:
-        (Tuple[pd.Series, pd.Series]): A tuple containing two Series: (EMA 20, EMA 50) in this order.
+        pd.DataFrame with one column per period, named ``ema_{period}``.
+
     Raises:
-        KeyError: If 'close' column is not present in the DataFrame.
+        KeyError: *price_col* not in *df*.
+        ValueError: *df* is empty.
     """
-    if 'close' not in df.columns:
-        raise KeyError("DataFrame must contain 'close' column.")
-    ema_20 = df['close'].ewm(span=20, adjust=False).mean()
-    ema_50 = df['close'].ewm(span=50, adjust=False).mean()
-    return (ema_20, ema_50)
+    if price_col not in df.columns:
+        raise KeyError(f"DataFrame must contain '{price_col}' column.")
+    if df.empty:
+        raise ValueError("DataFrame is empty, cannot compute EMAs.")
+    return pd.concat(
+        {f"ema_{p}": df[price_col].ewm(
+            span=p, adjust=adjust).mean() for p in periods},
+        axis=1
+    )
 
 
-def bullish_crossover(df: pd.DataFrame) -> bool:
+def crosses(fast: pd.Series, slow: pd.Series, direction: str = "up") -> bool:
     """
-    Checks for a bullish crossover between the 20-period and 50-period EMAs.
-    Args:
-        pd.DataFrame: DataFrame containing 'close' prices.
-    Returns:
-        bool: True if a bullish crossover occurred, False otherwise.
-    """
-    required_cols = ['close']
-    if len(df) < 2 or not all(col in df.columns for col in required_cols):
-        return False
-    if df['close'].isnull().any():
-        return False
-    ema_20, ema_50 = calc_ema(df)
-    if ema_20.empty or ema_50.empty:
-        return False
-    # Check for NaN values in the last two elements
-    if (
-        pd.isna(ema_20.iloc[-1]) or pd.isna(ema_50.iloc[-1]) or
-        pd.isna(ema_20.iloc[-2]) or pd.isna(ema_50.iloc[-2])
-    ):
-        return False
-    crossed_above = ema_20.iloc[-1] > ema_50.iloc[-1]
-    was_below = ema_20.iloc[-2] <= ema_50.iloc[-2]
-    return crossed_above and was_below
+    Detects latest crossover.
 
+    direction: "up" for bullish, "down" for bearish.
+    """
+    if len(fast) < 2 or len(slow) < 2:
+        return False
+    if fast.index[-2:] != slow.index[-2:]:
+        raise ValueError("Series misaligned")
 
-def bearish_crossover(df: pd.DataFrame) -> bool:
-    """
-    Checks for a bearish crossover between the 20-period and 50-period EMAs.
-    Args:
-        pd.DataFrame: DataFrame containing 'close' prices.
-    Returns:
-        bool: True if a bearish crossover occurred, False otherwise.
-    """
-    required_cols = ['close']
-    if len(df) < 2 or not all(col in df.columns for col in required_cols):
-        return False
-    if df['close'].isnull().any():
-        return False
-    ema_20, ema_50 = calc_ema(df)
-    if ema_20.empty or ema_50.empty:
-        return False
-    # Check for NaN values in the last two elements
-    if (
-        pd.isna(ema_20.iloc[-1]) or pd.isna(ema_50.iloc[-1]) or
-        pd.isna(ema_20.iloc[-2]) or pd.isna(ema_50.iloc[-2])
-    ):
-        return False
-    crossed_below = ema_20.iloc[-1] < ema_50.iloc[-1]
-    was_above = ema_20.iloc[-2] >= ema_50.iloc[-2]
-    return crossed_below and was_above
+    if direction == "up":
+        return fast.iloc[-1] > slow.iloc[-1] and fast.iloc[-2] <= slow.iloc[-2]
+    if direction == "down":
+        return fast.iloc[-1] < slow.iloc[-1] and fast.iloc[-2] >= slow.iloc[-2]
+    raise ValueError("direction must be 'up' or 'down'")
+
 
 # Order Management
 
@@ -173,8 +153,8 @@ def get_position():
     pass  # Placeholder for getting current position logic
 
 
-def usdc_balance() -> float:
-    pass  # Placeholder for fetching USDC balance logic
+def get_balance() -> float:
+    pass  # Placeholder for fetching USDC account balance logic
 
 
 def get_position_size():
