@@ -19,7 +19,7 @@ import os
 import time
 import datetime as dt
 import sqlite3
-from typing import Iterable, Optional, Tuple
+from typing import Any, Iterable, Optional, Tuple
 
 import ccxt
 from dotenv import load_dotenv
@@ -29,8 +29,8 @@ import pandas as pd
 PAIR: str = "BTC/USD"
 TIMEFRAME: str = "15m"
 DB_FILE: str = "bot_log.db"
-ORDER_QTY: float = 0.00001  # ~ $0.60 @ $60k BTC – adjust to your test size
-PRICE_OFFSET_PCT: float = -0.01  # 1 % below last price (buy‑side)
+ORDER_QTY: float = 0.00001  # * ~ $0.60 @ $60k BTC – adjust to your test size
+PRICE_OFFSET_PCT: float = -0.01  # * 1 % below last price (buy‑side)
 CURRENCY: str = "USDC"
 BARS_LOOKBACK: int = 200
 
@@ -46,7 +46,7 @@ exchange = ccxt.coinbase({
     "enableRateLimit": True,
 })
 
-TIMEFRAME_MS = exchange.parse_timeframe(TIMEFRAME) * 1000  # 15m → 900 000 ms
+TIMEFRAME_MS = exchange.parse_timeframe(TIMEFRAME) * 1000  # * 15m → 900 000 ms
 
 
 def init_db(db_file: str) -> Tuple[sqlite3.Connection, sqlite3.Cursor]:
@@ -84,11 +84,11 @@ con, cur = init_db(DB_FILE)
 
 
 def fetch_candles(conn: sqlite3.Connection):
-    pass  # Placeholder for fetching candles logic
+    pass  # TODO: Placeholder for fetching candles logic
 
 
 def store_candles():
-    pass  # Placeholder for storing candles logic
+    pass  # TODO: Placeholder for storing candles logic
 
 # Strategy Logic
 
@@ -142,44 +142,63 @@ def crosses(fast: pd.Series, slow: pd.Series, direction: str = "up") -> bool:
 
 
 def last_order():
-    pass  # Placeholder for fetching last order logic
+    pass  # TODO: Placeholder for fetching last order logic
 
 
 def in_position() -> bool:
-    pass  # Placeholder for checking if in position logic
+    pass  # TODO: Placeholder for checking if in position logic
 
 
 def get_position():
-    pass  # Placeholder for getting current position logic
+    pass  # TODO: Placeholder for getting current position logic
 
 
-def get_balance() -> float:
-    pass  # Placeholder for fetching USDC account balance logic
+def get_balance(exchange: Any, asset: str = "USDC") -> float:
+    """
+    Fetches the available balance of a given asset.
+
+    Args:
+        exchange: Exchange object with fetch_balance() method.
+        asset (str): Asset ticker (default "USDC").
+
+    Returns:
+        float: Free balance of the asset, or 0.0 if unavailable.
+    Raises:
+        Exception: Propagates API/network errors.
+    """
+    try:
+        balance = exchange.fetch_balance()
+        return float(balance.get(asset, {}).get("free", 0.0))
+    except Exception as e:
+        # TODO: Placeholder for logging error here in real prod code
+        print(f"Error fetching balance for {asset}: {e}")
+        return 0.0
 
 
 def get_position_size():
-    pass  # Placeholder for calculating position size logic
+    pass  # TODO: Placeholder for calculating position size logic
 
 # Order Execution
 
 
 def record_order():
-    pass  # Placeholder for recording order logic
+    pass  # TODO: Placeholder for recording order logic
 
 
 def place_market_buy():
-    pass  # Placeholder for placing market buy order logic
+    pass  # TODO: Placeholder for placing market buy order logic
 
 
 def place_market_sell():
-    pass  # Placeholder for placing market sell order logic
+    pass  # TODO: Placeholder for placing market sell order logic
 
 
-def main(is_live: bool = False,):
+def main(is_live: bool = False, risk_pct: float = 0.01):
     while True:
         try:
+            print(get_balance())
             print("[i] Fetching new candles...")
-            time.sleep(1)  # Rate limit safeguard
+            time.sleep(1)  # * Rate limit safeguard
         except Exception as e:
             print("[!] Error:", e)
             time.sleep(30)
@@ -197,6 +216,6 @@ if __name__ == "__main__":
 
     is_live = args.live
     if args.paper:
-        is_live = False  # Override live mode if paper trading is selected
+        is_live = False  # * Override live mode if paper trading is selected
     risk_per_trade = args.risk
     main(is_live=is_live, risk_pct=risk_per_trade)
