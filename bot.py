@@ -16,6 +16,7 @@ COINBASE_API_KEY, COINBASE_API_SECRET, COINBASE_API_PASSPHRASE
 
 import argparse
 import os
+import sys
 import time
 import datetime as dt
 import sqlite3
@@ -33,6 +34,8 @@ ORDER_QTY: float = 0.00001  # * ~ $0.60 @ $60k BTC – adjust to your test size
 PRICE_OFFSET_PCT: float = -0.01  # * 1 % below last price (buy‑side)
 CURRENCY: str = "USDC"
 BARS_LOOKBACK: int = 200
+LAST_BALANCE_UPDATE: Optional[dt.datetime] = None
+PREVIOUS_BALANCE: float = 0.0
 
 load_dotenv()
 API_KEY = os.getenv("COINBASE_API_KEY")
@@ -193,10 +196,21 @@ def place_market_sell():
     pass  # TODO: Placeholder for placing market sell order logic
 
 
-def main(is_live: bool = False, risk_pct: float = 0.01):
+def main(is_live: bool = False, risk_pct: float = 0.01, daily_risk_limit: float = 0.1):
     while True:
+        global LAST_BALANCE_UPDATE, PREVIOUS_BALANCE
         try:
-            print(get_balance())
+            if LAST_BALANCE_UPDATE is None or (dt.datetime.now() - LAST_BALANCE_UPDATE).days > 1:
+                LAST_BALANCE_UPDATE = dt.datetime.now()
+                PREVIOUS_BALANCE = get_balance(exchange, CURRENCY)
+                print(f"[i] Balance updated: {PREVIOUS_BALANCE} {CURRENCY}")
+            else:
+                current_balance = get_balance(exchange, CURRENCY)
+                if current_balance < PREVIOUS_BALANCE * (1 - daily_risk_limit):
+                    print(
+                        f"[!] Balance dropped below daily risk threshold: {current_balance} {CURRENCY}")
+                    # TODO: Add logic to stop trading or alert
+                    sys.exit(1)  # * shutdown bot
             print("[i] Fetching new candles...")
             time.sleep(1)  # * Rate limit safeguard
         except Exception as e:
@@ -212,10 +226,14 @@ if __name__ == "__main__":
                         help="Enable paper trading")
     parser.add_argument("--risk", type=float, default=0.01,
                         help="Risk per trade")
+    parser.add_argument("--DailyRisk", type=float, default=0.1,
+                        help="Daily risk limit as a percentage of balance")
     args = parser.parse_args()
 
     is_live = args.live
     if args.paper:
         is_live = False  # * Override live mode if paper trading is selected
     risk_per_trade = args.risk
-    main(is_live=is_live, risk_pct=risk_per_trade)
+    daily_risk_limit = args.DailyRisk
+    main(is_live=is_live, risk_pct=risk_per_trade,
+         daily_risk_limit=daily_risk_limit)
