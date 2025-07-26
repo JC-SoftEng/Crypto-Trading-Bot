@@ -181,6 +181,29 @@ def get_balance(exchange: Any, asset: str = "USDC") -> float:
 def get_position_size():
     pass  # TODO: Placeholder for calculating position size logic
 
+
+def check_daily_drawdown(daily_risk_limit: float) -> bool:
+    """
+    Checks if the daily drawdown exceeds the risk limit.
+
+    Returns:
+        bool: True if drawdown exceeds limit, False otherwise.
+    """
+    global LAST_BALANCE_UPDATE, PREVIOUS_BALANCE
+    if LAST_BALANCE_UPDATE is None or (dt.datetime.now() - LAST_BALANCE_UPDATE).days > 1:
+        LAST_BALANCE_UPDATE = dt.datetime.now()
+        PREVIOUS_BALANCE = get_balance(exchange, CURRENCY)
+        print(f"[i] Balance updated: {PREVIOUS_BALANCE} {CURRENCY}")
+        return False  # * No drawdown check needed on first run
+
+    current_balance = get_balance(exchange, CURRENCY)
+    # * daily risk limit
+    if current_balance < PREVIOUS_BALANCE * (1 - daily_risk_limit):
+        print(
+            f"[!] Balance dropped below daily risk threshold: {current_balance} {CURRENCY}")
+        return True  # * Drawdown exceeded
+    return False  # * No drawdown exceeded
+
 # Order Execution
 
 
@@ -200,17 +223,10 @@ def main(is_live: bool = False, risk_pct: float = 0.01, daily_risk_limit: float 
     while True:
         global LAST_BALANCE_UPDATE, PREVIOUS_BALANCE
         try:
-            if LAST_BALANCE_UPDATE is None or (dt.datetime.now() - LAST_BALANCE_UPDATE).days > 1:
-                LAST_BALANCE_UPDATE = dt.datetime.now()
-                PREVIOUS_BALANCE = get_balance(exchange, CURRENCY)
-                print(f"[i] Balance updated: {PREVIOUS_BALANCE} {CURRENCY}")
-            else:
-                current_balance = get_balance(exchange, CURRENCY)
-                if current_balance < PREVIOUS_BALANCE * (1 - daily_risk_limit):
-                    print(
-                        f"[!] Balance dropped below daily risk threshold: {current_balance} {CURRENCY}")
-                    # TODO: Add logic to stop trading or alert
-                    sys.exit(1)  # * shutdown bot
+            if check_daily_drawdown(daily_risk_limit):
+                print("[!] Daily drawdown exceeded, shutting down bot.")
+                sys.exit(0)
+                # TODO: Placeholder proper shutdown logic
             print("[i] Fetching new candles...")
             time.sleep(1)  # * Rate limit safeguard
         except Exception as e:
