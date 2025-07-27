@@ -34,8 +34,9 @@ ORDER_QTY: float = 0.00001  # * ~ $0.60 @ $60k BTC – adjust to your test size
 PRICE_OFFSET_PCT: float = -0.01  # * 1 % below last price (buy‑side)
 CURRENCY: str = "USDC"
 BARS_LOOKBACK: int = 200
-LAST_BALANCE_UPDATE: Optional[dt.datetime] = None
-PREVIOUS_BALANCE: float = 0.0
+
+previous_balance: float = 0.0
+last_balance_update: Optional[dt.datetime] = None
 
 load_dotenv()
 API_KEY = os.getenv("COINBASE_API_KEY")
@@ -189,16 +190,16 @@ def check_daily_drawdown(daily_risk_limit: float) -> bool:
     Returns:
         bool: True if drawdown exceeds limit, False otherwise.
     """
-    global LAST_BALANCE_UPDATE, PREVIOUS_BALANCE
-    if LAST_BALANCE_UPDATE is None or (dt.datetime.now() - LAST_BALANCE_UPDATE).days > 1:
-        LAST_BALANCE_UPDATE = dt.datetime.now()
-        PREVIOUS_BALANCE = get_balance(exchange, CURRENCY)
-        print(f"[i] Balance updated: {PREVIOUS_BALANCE} {CURRENCY}")
+    global last_balance_update, previous_balance
+    if last_balance_update is None or (dt.datetime.now() - last_balance_update).days > 1:
+        last_balance_update = dt.datetime.now()
+        previous_balance = get_balance(exchange, CURRENCY)
+        print(f"[i] Balance updated: {previous_balance} {CURRENCY}")
         return False  # * No drawdown check needed on first run
 
     current_balance = get_balance(exchange, CURRENCY)
     # * daily risk limit
-    if current_balance < PREVIOUS_BALANCE * (1 - daily_risk_limit):
+    if current_balance < previous_balance * (1 - daily_risk_limit):
         print(
             f"[!] Balance dropped below daily risk threshold: {current_balance} {CURRENCY}")
         return True  # * Drawdown exceeded
@@ -221,7 +222,6 @@ def place_market_sell():
 
 def main(is_live: bool = False, risk_pct: float = 0.01, daily_risk_limit: float = 0.1):
     while True:
-        global LAST_BALANCE_UPDATE, PREVIOUS_BALANCE
         try:
             if check_daily_drawdown(daily_risk_limit):
                 print("[!] Daily drawdown exceeded, shutting down bot.")
