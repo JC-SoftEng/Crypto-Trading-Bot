@@ -187,18 +187,25 @@ def check_daily_drawdown(daily_risk_limit: float) -> bool:
     """
     Checks if the daily drawdown exceeds the risk limit.
 
+    Args:
+        daily_risk_limit (float): Daily risk limit as a percentage of balance.
     Returns:
         bool: True if drawdown exceeds limit, False otherwise.
+    Raises:
+        Exception: Propagates API/network errors.
     """
     global last_balance_update, previous_balance
-    if last_balance_update is None or (dt.datetime.now() - last_balance_update).days > 1:
+    if last_balance_update is None or (dt.datetime.now() - last_balance_update) > dt.timedelta(hours=24):
         last_balance_update = dt.datetime.now()
-        previous_balance = get_balance(exchange, CURRENCY)
-        print(f"[i] Balance updated: {previous_balance} {CURRENCY}")
-        return False  # * No drawdown check needed on first run
-
+        try:
+            balance = get_balance(exchange, CURRENCY)
+            if balance > 0.0:
+                previous_balance = balance
+        except Exception as e:
+            print(f"[!] Error fetching balance: {e}")
+            return False
     current_balance = get_balance(exchange, CURRENCY)
-    # * daily risk limit
+    # Check if current balance has dropped below the allowed daily risk threshold
     if current_balance < previous_balance * (1 - daily_risk_limit):
         print(
             f"[!] Balance dropped below daily risk threshold: {current_balance} {CURRENCY}")
