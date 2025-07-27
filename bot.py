@@ -189,6 +189,7 @@ def check_daily_drawdown(daily_risk_limit: float) -> bool:
 
     Args:
         daily_risk_limit (float): Daily risk limit as a percentage of balance.
+
     Returns:
         bool: True if drawdown exceeds limit, False otherwise.
     Raises:
