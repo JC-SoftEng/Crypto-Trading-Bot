@@ -5,8 +5,8 @@ This version of the bot is my own
 
 USAGE
 -----
-$ python main.py --live        # real trade (default)
-$ python main.py --paper       # log only, no real orders
+$ python main.py --live        # real trade
+$ python main.py --paper       # log only, no real orders (default)
 $ python main.py --risk 0.5  # use 0.5 % risk per position
 
 ENV
@@ -251,5 +251,7 @@ if __name__ == "__main__":
         is_live = False  # * Override live mode if paper trading is selected
     risk_per_trade = args.risk
     daily_risk_limit = args.DailyRisk
+    print(
+        f"[i] Starting bot in {'live' if is_live else 'paper'} mode with risk {risk_per_trade * 100}% per trade and daily risk limit {daily_risk_limit * 100}%")
     main(is_live=is_live, risk_pct=risk_per_trade,
          daily_risk_limit=daily_risk_limit)
