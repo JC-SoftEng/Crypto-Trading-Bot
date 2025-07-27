@@ -205,7 +205,11 @@ def check_daily_drawdown(daily_risk_limit: float) -> bool:
         except Exception as e:
             print(f"[!] Error fetching balance: {e}")
             return False
-    current_balance = get_balance(exchange, CURRENCY)
+    try:
+        current_balance = get_balance(exchange, CURRENCY)
+    except Exception as e:
+        print(f"[!] Error fetching current balance: {e}")
+        return False
     # Check if current balance has dropped below the allowed daily risk threshold
     if current_balance < previous_balance * (1 - daily_risk_limit):
         print(
